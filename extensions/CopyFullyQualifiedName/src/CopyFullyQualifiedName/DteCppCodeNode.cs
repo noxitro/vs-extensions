@@ -9,6 +9,15 @@ namespace CopyFullyQualifiedName;
 /// </summary>
 internal sealed class DteCppCodeNode(CodeElement element, string filePath) : ICppCodeNode
 {
+    /// <summary>
+    /// コードモデルが「該当なし・取得できない」の意味で返す例外か。
+    /// COM の HRESULT は .NET の例外型に写される(E_INVALIDARG → ArgumentException、
+    /// E_NOINTERFACE → InvalidCastException、E_ACCESSDENIED → UnauthorizedAccessException)ので、
+    /// COMException だけでは拾いきれない。
+    /// </summary>
+    public static bool IsCodeModelError(Exception ex) =>
+        ex is COMException or NotImplementedException or ArgumentException or InvalidCastException or UnauthorizedAccessException;
+
     public string Name
     {
         get
@@ -18,7 +27,7 @@ internal sealed class DteCppCodeNode(CodeElement element, string filePath) : ICp
             {
                 return element.Name ?? "";
             }
-            catch (Exception ex) when (ex is COMException or NotImplementedException)
+            catch (Exception ex) when (IsCodeModelError(ex))
             {
                 return "";
             }
@@ -34,7 +43,7 @@ internal sealed class DteCppCodeNode(CodeElement element, string filePath) : ICp
             {
                 return element.FullName ?? "";
             }
-            catch (Exception ex) when (ex is COMException or NotImplementedException)
+            catch (Exception ex) when (IsCodeModelError(ex))
             {
                 return "";
             }
@@ -50,7 +59,7 @@ internal sealed class DteCppCodeNode(CodeElement element, string filePath) : ICp
             {
                 return Wrap(element.Children, filePath);
             }
-            catch (Exception ex) when (ex is COMException or NotImplementedException)
+            catch (Exception ex) when (IsCodeModelError(ex))
             {
                 return [];
             }
@@ -74,7 +83,7 @@ internal sealed class DteCppCodeNode(CodeElement element, string filePath) : ICp
             end = element.EndPoint.AbsoluteCharOffset;
             return true;
         }
-        catch (Exception ex) when (ex is COMException or NotImplementedException or ArgumentException)
+        catch (Exception ex) when (IsCodeModelError(ex))
         {
             return false;
         }

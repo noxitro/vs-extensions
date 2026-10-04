@@ -105,69 +105,93 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
 }
 
+# devenv は起動時の環境変数を引き継ぐので、起動の間だけ設定して元に戻す。
+# 呼び出し元のシェルに残すと、そのシェルから普通に起動した VS でもコピーがスキップされてしまう
+$previousSkip = $env:COPYFQN_E2E_SKIP_CLIPBOARD
 $env:COPYFQN_E2E_SKIP_CLIPBOARD = '1'
-$process = Start-Process -FilePath (Find-DevEnv) -ArgumentList @('/rootSuffix', 'Exp', "`"$(Join-Path $samples 'Samples.slnx')`"") -PassThru
+try {
+    $process = Start-Process -FilePath (Find-DevEnv) -ArgumentList @('/rootSuffix', 'Exp', "`"$(Join-Path $samples 'Samples.slnx')`"") -PassThru
+}
+finally {
+    $env:COPYFQN_E2E_SKIP_CLIPBOARD = $previousSkip
+}
 Write-Host "Started experimental instance (PID $($process.Id))."
 
-$dte = $null
-$deadline = (Get-Date).AddSeconds(240)
-while (-not $dte -and (Get-Date) -lt $deadline) {
-    Close-FirstRunDialog -ProcessId $process.Id
-    try { $dte = Get-VsDte -ProcessId $process.Id -TimeoutSeconds 5 } catch { }
-}
-if (-not $dte) { throw 'Experimental instance did not become ready.' }
-
-Invoke-WithRetry -TimeoutSeconds 180 {
-    if (-not $dte.Solution.IsOpen -or $dte.Solution.Projects.Count -lt 2) { throw 'solution is loading' }
-}
-
-$menuItem = Invoke-WithRetry -TimeoutSeconds 120 {
-    $item = $dte.CommandBars.Item('Code Window').Controls |
-        Where-Object { $_.Caption -in @('完全修飾名をコピー', 'Copy Fully Qualified Name') } |
-        Select-Object -First 1
-    if (-not $item) { throw 'menu item not found' }
-    $item
-}
-Write-Host "Context menu item found: $($menuItem.Caption)"
-
-$prefixes = @('完全修飾名をコピーしました: ', 'Copied fully qualified name: ')
 $failures = 0
-foreach ($case in $cases) {
-    $file, $pattern, $occurrence, $offset, $expected = $case
-    $pos = Find-TextPosition -Path $file -Pattern $pattern -Occurrence $occurrence -Offset $offset
-    $label = '{0}:{1}:{2} ({3})' -f (Split-Path $file -Leaf), $pos.Line, $pos.Column, $pattern
-
-    # 言語サービスの初期化待ちを兼ねて、期待値になるまで(またはタイムアウトまで)再実行する
-    $actual = $null
-    $caseDeadline = (Get-Date).AddSeconds($CaseTimeoutSeconds)
-    do {
-        Set-VsCaret -Dte $dte -Path $file -Line $pos.Line -Column $pos.Column
-        Invoke-WithRetry { $dte.StatusBar.Text = '<e2e-pending>' }
-        Invoke-WithRetry { $menuItem.Execute() }
-        $statusDeadline = (Get-Date).AddSeconds(5)
-        do {
-            Start-Sleep -Milliseconds 200
-            $status = Invoke-WithRetry { $dte.StatusBar.Text }
-        } while ($status -eq '<e2e-pending>' -and (Get-Date) -lt $statusDeadline)
-
-        $actual = $status
-        foreach ($prefix in $prefixes) {
-            if ($status.StartsWith($prefix)) { $actual = $status.Substring($prefix.Length) }
-        }
-        if ($actual -ne $expected) { Start-Sleep -Seconds 2 }
-    } while ($actual -ne $expected -and (Get-Date) -lt $caseDeadline)
-
-    if ($actual -eq $expected) {
-        Write-Host "PASS $label -> $actual" -ForegroundColor Green
+$dte = $null
+try {
+    $deadline = (Get-Date).AddSeconds(240)
+    while (-not $dte -and (Get-Date) -lt $deadline) {
+        Close-FirstRunDialog -ProcessId $process.Id
+        try { $dte = Get-VsDte -ProcessId $process.Id -TimeoutSeconds 5 } catch { }
     }
-    else {
-        $failures++
-        Write-Host "FAIL $label -> expected '$expected' but got '$actual'" -ForegroundColor Red
+    if (-not $dte) { throw 'Experimental instance did not become ready.' }
+
+    Invoke-WithRetry -TimeoutSeconds 180 {
+        if (-not $dte.Solution.IsOpen -or $dte.Solution.Projects.Count -lt 2) { throw 'solution is loading' }
+    }
+
+    $menuItem = Invoke-WithRetry -TimeoutSeconds 120 {
+        $item = $dte.CommandBars.Item('Code Window').Controls |
+            Where-Object { $_.Caption -in @('完全修飾名をコピー', 'Copy Fully Qualified Name') } |
+            Select-Object -First 1
+        if (-not $item) { throw 'menu item not found' }
+        $item
+    }
+    Write-Host "Context menu item found: $($menuItem.Caption)"
+
+    $prefixes = @('完全修飾名をコピーしました: ', 'Copied fully qualified name: ')
+    foreach ($case in $cases) {
+        $file, $pattern, $occurrence, $offset, $expected = $case
+        $pos = Find-TextPosition -Path $file -Pattern $pattern -Occurrence $occurrence -Offset $offset
+        $label = '{0}:{1}:{2} ({3})' -f (Split-Path $file -Leaf), $pos.Line, $pos.Column, $pattern
+
+        # 言語サービスの初期化待ちを兼ねて、期待値になるまで(またはタイムアウトまで)再実行する
+        $actual = $null
+        $caseDeadline = (Get-Date).AddSeconds($CaseTimeoutSeconds)
+        do {
+            Set-VsCaret -Dte $dte -Path $file -Line $pos.Line -Column $pos.Column
+            Invoke-WithRetry { $dte.StatusBar.Text = '<e2e-pending>' }
+            Invoke-WithRetry { $menuItem.Execute() }
+            $statusDeadline = (Get-Date).AddSeconds(5)
+            do {
+                Start-Sleep -Milliseconds 200
+                $status = Invoke-WithRetry { $dte.StatusBar.Text }
+            } while ($status -eq '<e2e-pending>' -and (Get-Date) -lt $statusDeadline)
+
+            $actual = $status
+            foreach ($prefix in $prefixes) {
+                if ($status.StartsWith($prefix)) { $actual = $status.Substring($prefix.Length) }
+            }
+            if ($actual -ne $expected) { Start-Sleep -Seconds 2 }
+        } while ($actual -ne $expected -and (Get-Date) -lt $caseDeadline)
+
+        if ($actual -eq $expected) {
+            Write-Host "PASS $label -> $actual" -ForegroundColor Green
+        }
+        else {
+            $failures++
+            Write-Host "FAIL $label -> expected '$expected' but got '$actual'" -ForegroundColor Red
+        }
     }
 }
-
-if (-not $KeepOpen) {
-    Invoke-WithRetry { $dte.Quit() }
+finally {
+    if (-not $KeepOpen) {
+        # 正常に終われば DTE で閉じる。DTE が取れない・途中で例外が出た・保存確認で止まった
+        # ときは、起動したプロセス (自分の実験用インスタンスだけ) を止めて放置しない
+        $closed = $false
+        if ($dte) {
+            try {
+                Invoke-WithRetry -TimeoutSeconds 30 { $dte.Quit() }
+                $closed = $process.WaitForExit(60000)
+            }
+            catch { }
+        }
+        if (-not $closed -and -not $process.HasExited) {
+            Write-Warning "Stopping experimental instance (PID $($process.Id))."
+            Stop-Process -Id $process.Id -Force
+        }
+    }
 }
 
 Write-Host ''

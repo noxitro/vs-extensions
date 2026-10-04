@@ -92,9 +92,11 @@ jobs:
           ./build.ps1 -Configuration Debug -SkipTests 2>&1 | Tee-Object -FilePath build-debug.log
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 (Debug) が失敗 (exit $LASTEXITCODE)" }
 
-      # Debug のビルドが artifacts/vsix を上書きするので、Release の .vsix を上げ直すため作り直す
+      # Debug のビルドが artifacts/vsix を上書きするので、Release の .vsix を上げ直すため作り直す。
+      # Debug だけ落ちたときも Release の .vsix は試せるよう上げる。status 関数を書かないと
+      # 既定の success() (= それまでの全ステップが成功) が付くので、!cancelled() を明示する
       - name: Collect Release VSIX
-        if: steps.release.outcome == 'success'
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
         run: |
           $out = New-Item -ItemType Directory -Force -Path 'artifacts/vsix-release'
           Get-ChildItem 'artifacts/bin' -Recurse -Filter '*.vsix' |
@@ -103,7 +105,7 @@ jobs:
           Get-ChildItem $out -Name
 
       - name: Upload VSIX
-        if: steps.release.outcome == 'success'
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: vsix

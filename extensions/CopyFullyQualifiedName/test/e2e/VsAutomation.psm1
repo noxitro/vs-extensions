@@ -1,7 +1,7 @@
 ﻿# 実験用インスタンス(/rootSuffix Exp)の Visual Studio を DTE 経由で操作するための補助関数。
 # 起動中の他の Visual Studio には触れないよう、自分で起動したプロセスの DTE だけを ROT から取得する。
 
-if (-not ('VsE2E.Rot' -as [type])) {
+if (-not ('VsE2E.DteRot' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -9,7 +9,7 @@ using System.Runtime.InteropServices.ComTypes;
 
 namespace VsE2E
 {
-    public static class Rot
+    public static class DteRot
     {
         [DllImport("ole32.dll")]
         private static extern int GetRunningObjectTable(int reserved, out IRunningObjectTable rot);
@@ -17,8 +17,11 @@ namespace VsE2E
         [DllImport("ole32.dll")]
         private static extern int CreateBindCtx(int reserved, out IBindCtx ctx);
 
-        public static object Get(string displayName)
+        // DTE は「!VisualStudio.DTE.<メジャー版>.0:<PID>」の名前で登録される。
+        // 版 (VS 2022 は 17.0、VS 2026 は 18.0) には依存せず、PID で探す
+        public static object GetByProcessId(int processId)
         {
+            var suffix = ":" + processId;
             IRunningObjectTable rot;
             IEnumMoniker monikers;
             IBindCtx ctx;
@@ -30,7 +33,8 @@ namespace VsE2E
             {
                 string name;
                 moniker[0].GetDisplayName(ctx, null, out name);
-                if (string.Equals(name, displayName, StringComparison.OrdinalIgnoreCase))
+                if (name.StartsWith("!VisualStudio.DTE.", StringComparison.OrdinalIgnoreCase)
+                    && name.EndsWith(suffix, StringComparison.Ordinal))
                 {
                     object value;
                     rot.GetObject(moniker[0], out value);
@@ -66,12 +70,11 @@ function Invoke-WithRetry {
 function Get-VsDte {
     param(
         [Parameter(Mandatory)][int]$ProcessId,
-        [string]$DteVersion = '18.0',
         [int]$TimeoutSeconds = 180
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        $dte = [VsE2E.Rot]::Get("!VisualStudio.DTE.$($DteVersion):$ProcessId")
+        $dte = [VsE2E.DteRot]::GetByProcessId($ProcessId)
         if ($null -ne $dte) { return $dte }
         Start-Sleep -Seconds 2
     }

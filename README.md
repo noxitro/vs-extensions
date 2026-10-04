@@ -97,7 +97,7 @@ GitHub Actions で次のワークフローが動きます(公開リポジトリ�
 | --- | --- | --- |
 | [CI](.github/workflows/ci.yml) | 全ブランチへの push(文書だけの変更は除く) | `build.ps1` で Release(単体テスト込み)と Debug をビルド。`.vsix` をアーティファクト `vsix` に保存。失敗時と復旧時に Discord へ通知 |
 | [CodeQL](.github/workflows/codeql.yml) | main への push・PR、毎週 | C# の静的解析 |
-| [File format](.github/workflows/file-format.yml) | 全ブランチへの push | BOM と改行コードの検査(下の「ファイル形式」) |
+| [File format](.github/workflows/file-format.yml) | 全ブランチへの push | BOM の検査(下の「ファイル形式」) |
 | [Secret scan](.github/workflows/secret-scan.yml) | 全ブランチへの push・PR | 秘密情報・個人情報・ライセンス文言の混入検査([noxitro/github-templates](https://github.com/noxitro/github-templates) の共通ワークフロー) |
 | [Workflow lint](.github/workflows/workflow-lint.yml) | `.github/` を変えた push | actionlint と ruff で CI 自身を検査 |
 
@@ -111,8 +111,8 @@ GitHub Actions で次のワークフローが動きます(公開リポジトリ�
 ## ファイル形式
 
 - テキストファイルは **BOM なしの UTF-8**。ただし PowerShell スクリプト(`*.ps1` `*.psm1` `*.psd1`)だけは **BOM 付き**(Windows PowerShell 5.1 が BOM の無いスクリプトを Shift-JIS として読むため。決まりは [.github/scripts/bom_policy.py](.github/scripts/bom_policy.py))。
-- 改行コードは各ファイルの元の形式を保つ。新規ファイルは `.editorconfig` に従う(`.bat` `.cmd` `.ps1` `.psm1` は CRLF、それ以外は LF)。
-- File format ワークフローが、作業ブランチの main との分岐点からの変更でこれを検査します。意図して変換するときは、コミットメッセージに `Format-Change: <パス or glob>` の行を書きます。push 前に手元で確かめるには次を実行します。
+- 改行コードは git が管理します。`.gitattributes` の `* text=auto` により、テキストファイルはリポジトリ内では LF で格納され、チェックアウト時に各環境の改行(Windows では CRLF)に変換されます。`.bat` `.cmd` `.ps1` `.psm1` は常に CRLF でチェックアウトされます。そのため改行の混入や一括変換はコミットに残りません。
+- File format ワークフローが、作業ブランチの main との分岐点からの変更で BOM を検査します(改行は上のとおり git が正規化するので、この検査では実質見ていません)。意図して BOM を付け外しするときは、コミットメッセージに `Format-Change: <パス or glob>` の行を書きます。BOM が付いてしまったファイルは `python .github/scripts/strip-bom.py <パス>` で外せます。push 前に手元で確かめるには次を実行します。
 
   ```bash
   python .github/scripts/check-file-format.py --base origin/main

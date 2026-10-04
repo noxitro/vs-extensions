@@ -153,7 +153,7 @@ internal sealed class CopyFullyQualifiedNameCommand : Command
             {
                 names.Add(element.FullName);
             }
-            catch (COMException ex)
+            catch (Exception ex) when (DteCppCodeNode.IsCodeModelError(ex))
             {
                 this.logger.TraceEvent(TraceEventType.Warning, 0, $"Skipped code element ({kind}): {ex.Message}");
             }
@@ -167,10 +167,18 @@ internal sealed class CopyFullyQualifiedNameCommand : Command
 
         // 2. 見つからない場合(名前空間内の関数プロトタイプ宣言、名前空間内の空白など)は、
         //    このファイル内の範囲でツリーをたどり、カーソル位置の識別子と同名の要素か、囲んでいる要素を使う
-        var lineText = caret.CreateEditPoint().GetLines(caret.Line, caret.Line + 1);
-        var identifier = CppNameSelector.GetIdentifierAt(lineText, caret.LineCharOffset - 1);
-        var roots = DteCppCodeNode.Wrap(fileCodeModel.CodeElements, filePath);
-        return CppNameSelector.SelectFromTree(roots, caret.AbsoluteCharOffset, identifier);
+        try
+        {
+            var lineText = caret.CreateEditPoint().GetLines(caret.Line, caret.Line + 1);
+            var identifier = CppNameSelector.GetIdentifierAt(lineText, caret.LineCharOffset - 1);
+            var roots = DteCppCodeNode.Wrap(fileCodeModel.CodeElements, filePath);
+            return CppNameSelector.SelectFromTree(roots, caret.AbsoluteCharOffset, identifier);
+        }
+        catch (Exception ex) when (DteCppCodeNode.IsCodeModelError(ex))
+        {
+            this.logger.TraceEvent(TraceEventType.Warning, 0, $"Code model tree walk failed: {ex.Message}");
+            return null;
+        }
     }
 
     private static CodeElement? GetCodeElement(FileCodeModel? fileCodeModel, TextPoint point, vsCMElement kind)
@@ -178,16 +186,12 @@ internal sealed class CopyFullyQualifiedNameCommand : Command
         Microsoft.VisualStudio.Shell.ThreadHelper.ThrowIfNotOnUIThread();
         try
         {
-            // 該当する種類の要素が無いと null を返すか COMException を投げる(言語サービスによって異なる)
+            // 該当する種類の要素が無いと null を返すか例外を投げる(言語サービスによって異なる)
             return fileCodeModel is not null
                 ? fileCodeModel.CodeElementFromPoint(point, kind)
                 : point.CodeElement[kind];
         }
-        catch (COMException)
-        {
-            return null;
-        }
-        catch (NotImplementedException)
+        catch (Exception ex) when (DteCppCodeNode.IsCodeModelError(ex))
         {
             return null;
         }
