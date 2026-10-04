@@ -6,9 +6,9 @@
 #         インストールして試せる。
 # 構成  : build … build.ps1 を Release (単体テスト込み) と Debug (ビルドだけ) で走らせる。
 #                 手元の build.bat と同じ入口を通すので、CI だけ通る / 手元だけ通るが起きない。
+#         e2e    … 実験用インスタンスの Visual Studio を起動して、拡張機能を実際に動かす
+#                  (試行中。落ちても CI 全体は落とさない。詳細はジョブのコメント)。
 #         notify … 失敗したときと、失敗から復旧したときだけ Discord に流す。
-#         E2E テスト (extensions/*/test/e2e) は実験用インスタンスの Visual Studio を
-#         画面付きで起動して DTE で操作するので、ホストランナーでは走らせない。手元で回す。
 # 環境  : windows-latest。2026-06 に VS2026 入りのイメージへ移行済み (Nox の CI で確認)。
 #         VSIX のビルドには Visual Studio 付属の MSBuild が要る (dotnet build では建たない)。
 #         「Visual Studio 拡張機能の開発」ワークロードがイメージに無い場合も、build.ps1 は
@@ -153,6 +153,69 @@ jobs:
           if ($vsix) {
             $lines += '', 'VSIX (アーティファクト `vsix`):'
             $lines += $vsix | ForEach-Object { "- ``$($_.Name)`` ($([math]::Round($_.Length / 1KB)) KB)" }
+          }
+          $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+  # =========================================================
+  # E2E: 実験用インスタンスの Visual Studio を起動し、右クリックメニューの
+  # 項目を DTE で実行して、ステータスバーとクリップボードの中身を照合する
+  #
+  # GitHub ホストの windows ランナーは対話デスクトップを持つ (Nox の FlaUI が動いている) ので、
+  # 画面付きの devenv を起こせる。手元と違ってクリップボードを使う人がいないので、
+  # -VerifyClipboard で実際にコピーされた文字列まで確かめる。
+  #
+  # 試行中なので continue-on-error にしてある (落ちても CI 全体は緑のまま、ジョブに印が付く)。
+  # 数回続けて安定したら外して必須にする。既報のリスク:
+  #   - VS 2026 入りイメージで devenv が「ライセンスの評価期間が終了」と出たことがある
+  #     (actions/runner-images#13641。イメージ更新で直った)。再発したら diagnostics の
+  #     screenshot.png / ui-elements.txt にダイアログが写る
+  #   - 真新しいイメージの初回起動は遅いので、起動待ちを長めに取る
+  # =========================================================
+  e2e:
+    name: E2E (Visual Studio)
+    runs-on: ${{ vars.VSEXT_RUNNER || 'windows-latest' }}
+    timeout-minutes: 40
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # Invoke-E2E.ps1 が Debug でビルドして Exp ハイブへデプロイし、samples/Samples.slnx を開いて検証する
+      - name: Run E2E
+        id: e2e
+        run: |
+          ./extensions/CopyFullyQualifiedName/test/e2e/Invoke-E2E.ps1 `
+            -VerifyClipboard `
+            -StartupTimeoutSeconds 900 `
+            -CaseTimeoutSeconds 120 `
+            -DiagnosticsDirectory "$env:GITHUB_WORKSPACE/artifacts/e2e-diagnostics" 2>&1 |
+            Tee-Object -FilePath e2e.log
+          if ($LASTEXITCODE -ne 0) { throw "E2E が失敗 (exit $LASTEXITCODE)" }
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics
+          path: |
+            artifacts/e2e-diagnostics/
+            e2e.log
+          if-no-files-found: warn
+
+      - name: Write job summary
+        if: always()
+        run: |
+          $icon = if ('${{ steps.e2e.outcome }}' -eq 'success') { ':white_check_mark:' } else { ':x:' }
+          $lines = @("## $icon E2E (Visual Studio)", '')
+          if (Test-Path e2e.log) {
+            $lines += Get-Content e2e.log | Select-String -Pattern '^(PASS|FAIL) |passed\.$|DTE ready|First-run|Stopping' |
+              ForEach-Object { "- ``$($_.Line.Trim())``" }
           }
           $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 

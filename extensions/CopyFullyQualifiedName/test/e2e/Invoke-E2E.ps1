@@ -7,22 +7,33 @@
     2. samples/Samples.slnx を Exp インスタンスで開く
     3. 各ケースでカーソルを置き、右クリックメニューの項目を DTE 経由で実行し、ステータスバーの結果を照合する
 
-    テスト実行者のクリップボードを上書きしないよう、Exp インスタンスには COPYFQN_E2E_SKIP_CLIPBOARD=1 を渡す。
+    既定では、テスト実行者のクリップボードを上書きしないよう、Exp インスタンスに
+    COPYFQN_E2E_SKIP_CLIPBOARD=1 を渡してクリップボードへの書き込みを省く。
+    -VerifyClipboard を付けると実際にクリップボードへ書き込ませ、その中身も照合する
+    (クリップボードを使う人がいない CI 向け)。
     起動中の他の Visual Studio には触れない(自分で起動したプロセスの DTE だけを使う)。
 
 .EXAMPLE
     pwsh -File Invoke-E2E.ps1
     pwsh -File Invoke-E2E.ps1 -SkipBuild -KeepOpen
+    pwsh -File Invoke-E2E.ps1 -VerifyClipboard -DiagnosticsDirectory artifacts/e2e   # CI
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
     [switch]$KeepOpen,
-    [int]$CaseTimeoutSeconds = 60
+    [int]$CaseTimeoutSeconds = 60,
+    # Visual Studio の起動 (DTE の登録) を待つ秒数。真新しい環境の初回起動は遅い
+    [int]$StartupTimeoutSeconds = 240,
+    # クリップボードに実際に書き込ませ、その中身も照合する。手元で付けると実行中はクリップボードが上書きされる
+    [switch]$VerifyClipboard,
+    # 指定すると、失敗時にスクリーンショット・画面上の文字・VS のログをここに保存する
+    [string]$DiagnosticsDirectory
 )
 
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'VsAutomation.psm1') -Force
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 
 $extensionRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $samples = Join-Path $extensionRoot 'samples'
@@ -82,21 +93,70 @@ function Find-DevEnv {
     return $path
 }
 
-function Close-FirstRunDialog {
-    # 新しい Exp ハイブでは初回起動ダイアログが出るので、既定設定のまま閉じる(自分で起動したプロセスに限定)
+function Get-ProcessElements {
+    # 指定プロセスが持つ UI 要素 (トップレベルのウィンドウ以下すべて)。他のプロセスの画面は見ない
     param([int]$ProcessId)
-    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
     $A = [System.Windows.Automation.AutomationElement]
-    $cond = New-Object System.Windows.Automation.AndCondition(
-        (New-Object System.Windows.Automation.PropertyCondition($A::ProcessIdProperty, $ProcessId)),
-        (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)))
-    $buttons = $A::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    foreach ($button in $buttons) {
-        if ($button.Current.Name -in @('Visual Studio の開始', 'Start Visual Studio')) {
-            $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-            Write-Host 'Closed first-run dialog.'
+    $cond = New-Object System.Windows.Automation.PropertyCondition($A::ProcessIdProperty, $ProcessId)
+    return $A::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
+}
+
+function Close-FirstRunDialog {
+    # 新しい Exp ハイブでは初回起動の画面 (サインイン → 配色テーマ) が出るので、既定設定のまま進める。
+    # 自分で起動したプロセスに限定し、名前が完全に一致する要素だけを押す
+    param([int]$ProcessId)
+    $names = @(
+        # サインイン画面 (アカウント未登録の環境。CI など)
+        'Skip and add accounts later', 'Skip and add accounts later.', 'Not now, maybe later', 'Not now, maybe later.',
+        'スキップして後でアカウントを追加する', '後で行う。',
+        # 配色テーマ画面
+        'Start Visual Studio', 'Visual Studio の開始'
+    )
+    foreach ($element in (Get-ProcessElements -ProcessId $ProcessId)) {
+        if ($element.Current.Name -notin $names) { continue }
+        $pattern = $null
+        if ($element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+            $pattern.Invoke()
+            Write-Host "First-run screen: pressed '$($element.Current.Name)'."
+            return
         }
     }
+}
+
+function Save-Diagnostics {
+    # 失敗の原因 (ライセンス切れ・サインイン・想定外のダイアログなど) を後から見られるように残す
+    param([System.Diagnostics.Process]$Process, [string]$Reason)
+    if (-not $DiagnosticsDirectory) { return }
+    New-Item -ItemType Directory -Force -Path $DiagnosticsDirectory | Out-Null
+    Write-Host "Saving diagnostics to $DiagnosticsDirectory ($Reason)"
+    $Reason | Out-File (Join-Path $DiagnosticsDirectory 'reason.txt') -Encoding utf8
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+        $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+        $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+        $bitmap.Save((Join-Path $DiagnosticsDirectory 'screenshot.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+        $graphics.Dispose()
+        $bitmap.Dispose()
+    }
+    catch { Write-Warning "Screenshot failed: $_" }
+
+    if ($Process -and -not $Process.HasExited) {
+        try {
+            $lines = foreach ($element in (Get-ProcessElements -ProcessId $Process.Id)) {
+                if ($element.Current.Name) { "[$($element.Current.ControlType.ProgrammaticName)] $($element.Current.Name)" }
+            }
+            $lines | Select-Object -First 500 | Out-File (Join-Path $DiagnosticsDirectory 'ui-elements.txt') -Encoding utf8
+        }
+        catch { Write-Warning "UI dump failed: $_" }
+    }
+
+    # devenv に /log を渡しているので、Exp ハイブに ActivityLog.xml がある
+    Get-ChildItem (Join-Path $env:APPDATA 'Microsoft\VisualStudio') -Directory -Filter '*Exp' -ErrorAction SilentlyContinue |
+        ForEach-Object { Get-ChildItem $_.FullName -Filter 'ActivityLog.xml' -ErrorAction SilentlyContinue } |
+        ForEach-Object { Copy-Item $_.FullName (Join-Path $DiagnosticsDirectory "ActivityLog-$($_.Directory.Name).xml") -Force }
 }
 
 if (-not $SkipBuild) {
@@ -107,25 +167,30 @@ if (-not $SkipBuild) {
 
 # devenv は起動時の環境変数を引き継ぐので、起動の間だけ設定して元に戻す。
 # 呼び出し元のシェルに残すと、そのシェルから普通に起動した VS でもコピーがスキップされてしまう
+$devenvArgs = @('/rootSuffix', 'Exp', "`"$(Join-Path $samples 'Samples.slnx')`"")
+if ($DiagnosticsDirectory) { $devenvArgs = @('/log') + $devenvArgs }
 $previousSkip = $env:COPYFQN_E2E_SKIP_CLIPBOARD
-$env:COPYFQN_E2E_SKIP_CLIPBOARD = '1'
+$env:COPYFQN_E2E_SKIP_CLIPBOARD = if ($VerifyClipboard) { $null } else { '1' }
 try {
-    $process = Start-Process -FilePath (Find-DevEnv) -ArgumentList @('/rootSuffix', 'Exp', "`"$(Join-Path $samples 'Samples.slnx')`"") -PassThru
+    $process = Start-Process -FilePath (Find-DevEnv) -ArgumentList $devenvArgs -PassThru
 }
 finally {
     $env:COPYFQN_E2E_SKIP_CLIPBOARD = $previousSkip
 }
-Write-Host "Started experimental instance (PID $($process.Id))."
+Write-Host "Started experimental instance (PID $($process.Id)). Clipboard check: $([bool]$VerifyClipboard)"
 
 $failures = 0
 $dte = $null
+$failureReason = $null
 try {
-    $deadline = (Get-Date).AddSeconds(240)
+    $deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
     while (-not $dte -and (Get-Date) -lt $deadline) {
+        if ($process.HasExited) { throw "devenv exited during startup (exit code $($process.ExitCode))." }
         Close-FirstRunDialog -ProcessId $process.Id
         try { $dte = Get-VsDte -ProcessId $process.Id -TimeoutSeconds 5 } catch { }
     }
-    if (-not $dte) { throw 'Experimental instance did not become ready.' }
+    if (-not $dte) { throw "Experimental instance did not become ready within $StartupTimeoutSeconds seconds." }
+    Write-Host "DTE ready: Visual Studio $(Invoke-WithRetry { $dte.Version })"
 
     Invoke-WithRetry -TimeoutSeconds 180 {
         if (-not $dte.Solution.IsOpen -or $dte.Solution.Projects.Count -lt 2) { throw 'solution is loading' }
@@ -148,9 +213,11 @@ try {
 
         # 言語サービスの初期化待ちを兼ねて、期待値になるまで(またはタイムアウトまで)再実行する
         $actual = $null
+        $clipboard = $null
         $caseDeadline = (Get-Date).AddSeconds($CaseTimeoutSeconds)
         do {
             Set-VsCaret -Dte $dte -Path $file -Line $pos.Line -Column $pos.Column
+            if ($VerifyClipboard) { Set-Clipboard -Value '<e2e-pending>' }
             Invoke-WithRetry { $dte.StatusBar.Text = '<e2e-pending>' }
             Invoke-WithRetry { $menuItem.Execute() }
             $statusDeadline = (Get-Date).AddSeconds(5)
@@ -163,19 +230,32 @@ try {
             foreach ($prefix in $prefixes) {
                 if ($status.StartsWith($prefix)) { $actual = $status.Substring($prefix.Length) }
             }
-            if ($actual -ne $expected) { Start-Sleep -Seconds 2 }
-        } while ($actual -ne $expected -and (Get-Date) -lt $caseDeadline)
+            $ok = $actual -eq $expected
+            if ($VerifyClipboard) {
+                $clipboard = Get-Clipboard -Raw
+                $ok = $ok -and $clipboard -eq $expected
+            }
+            if (-not $ok) { Start-Sleep -Seconds 2 }
+        } while (-not $ok -and (Get-Date) -lt $caseDeadline)
 
-        if ($actual -eq $expected) {
+        if ($ok) {
             Write-Host "PASS $label -> $actual" -ForegroundColor Green
         }
         else {
             $failures++
-            Write-Host "FAIL $label -> expected '$expected' but got '$actual'" -ForegroundColor Red
+            $detail = if ($VerifyClipboard) { " (clipboard: '$clipboard')" } else { '' }
+            Write-Host "FAIL $label -> expected '$expected' but got '$actual'$detail" -ForegroundColor Red
         }
     }
+    if ($failures -gt 0) { $failureReason = "$failures case(s) failed" }
+}
+catch {
+    $failureReason = $_.Exception.Message
+    throw
 }
 finally {
+    if ($failureReason) { Save-Diagnostics -Process $process -Reason $failureReason }
+
     if (-not $KeepOpen) {
         # 正常に終われば DTE で閉じる。DTE が取れない・途中で例外が出た・保存確認で止まった
         # ときは、起動したプロセス (自分の実験用インスタンスだけ) を止めて放置しない
