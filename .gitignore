@@ -1,0 +1,22 @@
+# Build output
+artifacts/
+bin/
+obj/
+*.vsix
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userprefs
+
+# C++ sample build output
+x64/
+Debug/
+Release/
+*.VC.db
+*.VC.opendb
+ipch/
+
+# Test results
+TestResults/

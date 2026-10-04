@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="SampleCSharp/SampleCSharp.csproj" />
+  <Project Path="SampleCpp/SampleCpp.vcxproj" Id="4e2b7c1a-9d3f-4a6b-8c5e-1f2a3b4c5d6e" />
+</Solution>

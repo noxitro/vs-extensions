@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    VS に依存しないロジック(名前の解決・整形)。単体テストはこのプロジェクトに対して行う。
+    Roslyn は VS 本体が持っているので、VSIX に同梱されないよう PrivateAssets="all" にする。
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>CopyFullyQualifiedName</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="CopyFullyQualifiedName.Core.Tests" />
+  </ItemGroup>
+</Project>
