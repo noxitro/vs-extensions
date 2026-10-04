@@ -6,6 +6,7 @@
     pwsh -File build.ps1
     pwsh -File build.ps1 -Configuration Debug -SkipTests
     pwsh -File build.ps1 -Extension CopyFullyQualifiedName
+    pwsh -File build.ps1 -TestResultsDirectory artifacts/test-results   # CI 用。テスト結果を .trx で残す
 #>
 [CmdletBinding()]
 param(
@@ -13,7 +14,9 @@ param(
     [string]$Configuration = 'Release',
     [switch]$SkipTests,
     # 特定の拡張機能だけビルドする(extensions/ 直下のフォルダー名)
-    [string]$Extension
+    [string]$Extension,
+    # 指定すると、単体テストの結果を .trx でここに書き出す
+    [string]$TestResultsDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +25,14 @@ $root = $PSScriptRoot
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path $vswhere)) { throw 'Visual Studio が見つかりません(vswhere.exe がありません)。' }
 $msbuild = & $vswhere -latest -prerelease -requires Microsoft.VisualStudio.Workload.VisualStudioExtension -find 'MSBuild\**\Bin\amd64\MSBuild.exe' | Select-Object -First 1
-if (-not $msbuild) { throw '「Visual Studio 拡張機能の開発」ワークロードが入った Visual Studio が見つかりません。' }
+if (-not $msbuild) {
+    # VSIX のビルドに要るもの(VisualStudio.Extensibility のビルドタスク)は NuGet から来るので、
+    # ワークロードが無くても MSBuild があれば建つことがある。CI のランナーイメージ向けの逃げ道
+    $msbuild = & $vswhere -latest -prerelease -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\amd64\MSBuild.exe' | Select-Object -First 1
+    if (-not $msbuild) { throw 'MSBuild の入った Visual Studio が見つかりません。' }
+    Write-Warning '「Visual Studio 拡張機能の開発」ワークロードが見つからないので、通常の MSBuild でビルドします。'
+}
+Write-Host "MSBuild: $msbuild"
 
 $extensionDirs = Get-ChildItem (Join-Path $root 'extensions') -Directory
 if ($Extension) { $extensionDirs = $extensionDirs | Where-Object Name -eq $Extension }
@@ -49,7 +59,11 @@ foreach ($dir in $extensionDirs) {
     if (-not $SkipTests) {
         $testProjects = Get-ChildItem (Join-Path $dir.FullName 'test') -Recurse -Filter '*.Tests.csproj' -ErrorAction SilentlyContinue
         foreach ($project in $testProjects) {
-            dotnet test $project.FullName -c $Configuration --nologo
+            $testArgs = @($project.FullName, '-c', $Configuration, '--nologo')
+            if ($TestResultsDirectory) {
+                $testArgs += @('--logger', "trx;LogFileName=$($project.BaseName).trx", '--results-directory', $TestResultsDirectory)
+            }
+            dotnet test @testArgs
             if ($LASTEXITCODE -ne 0) { throw "テストに失敗しました: $($project.Name)" }
         }
     }

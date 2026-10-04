@@ -17,6 +17,7 @@ vs-extensions/
 ├─ Directory.Build.props        全プロジェクト共通のビルド設定(言語バージョン、出力先など)
 ├─ Directory.Packages.props     NuGet パッケージのバージョンを一元管理(Central Package Management)
 ├─ artifacts/                   ビルド出力(git 管理外)
+├─ .github/                     CI(workflows/)、CI 用スクリプト(scripts/)、Dependabot
 └─ extensions/
    └─ <拡張機能名>/
       ├─ README.md              その拡張機能の使い方・仕様
@@ -86,7 +87,36 @@ pwsh -File build.ps1 -Extension CopyFullyQualifiedName -Configuration Debug -Ski
 
 4. この README の「拡張機能一覧」に 1 行追加する
 
-`build.ps1` は `extensions/*/src/**/source.extension.vsixmanifest` を持つプロジェクトを VSIX として、`extensions/*/test/**/*.Tests.csproj` を単体テストとして自動で拾います。
+`build.ps1` は `extensions/*/src/**/source.extension.vsixmanifest` を持つプロジェクトを VSIX として、`extensions/*/test/**/*.Tests.csproj` を単体テストとして自動で拾います。CI も同じ `build.ps1` を通すので、追加した拡張機能は CI でも自動でビルド・テストされます。
+
+## CI
+
+GitHub Actions で次のワークフローが動きます(公開リポジトリなので無料枠の範囲)。構成は [Nox](https://github.com/noxitro/Nox) の CI に合わせています。
+
+| ワークフロー | きっかけ | 内容 |
+| --- | --- | --- |
+| [CI](.github/workflows/ci.yml) | 全ブランチへの push(文書だけの変更は除く) | `build.ps1` で Release(単体テスト込み)と Debug をビルド。`.vsix` をアーティファクト `vsix` に保存。失敗時と復旧時に Discord へ通知 |
+| [CodeQL](.github/workflows/codeql.yml) | main への push・PR、毎週 | C# の静的解析 |
+| [File format](.github/workflows/file-format.yml) | 全ブランチへの push | BOM と改行コードの検査(下の「ファイル形式」) |
+| [Secret scan](.github/workflows/secret-scan.yml) | 全ブランチへの push・PR | 秘密情報・個人情報・ライセンス文言の混入検査([noxitro/github-templates](https://github.com/noxitro/github-templates) の共通ワークフロー) |
+| [Workflow lint](.github/workflows/workflow-lint.yml) | `.github/` を変えた push | actionlint と ruff で CI 自身を検査 |
+
+補足:
+
+- 同じリポジトリのブランチからの PR では、CI は push 側だけで走ります(二重起動を避けるため)。PR のチェック欄には push 側の結果が出ます。
+- E2E テスト(`extensions/*/test/e2e`)は画面付きの Visual Studio を操作するので、CI では走らせません。手元で実行してください。
+- Discord 通知は secret `DISCORD_WEBHOOK_URL` を使います。未設定ならスキップするだけで、CI は落ちません。
+- 依存の更新は Dependabot が週 1 回 PR を出します。Roslyn と VS SDK は対応する最も古い VS に合わせているので、自動更新の対象から外しています。
+
+## ファイル形式
+
+- テキストファイルは **BOM なしの UTF-8**。ただし PowerShell スクリプト(`*.ps1` `*.psm1` `*.psd1`)だけは **BOM 付き**(Windows PowerShell 5.1 が BOM の無いスクリプトを Shift-JIS として読むため。決まりは [.github/scripts/bom_policy.py](.github/scripts/bom_policy.py))。
+- 改行コードは各ファイルの元の形式を保つ。新規ファイルは `.editorconfig` に従う(`.bat` `.cmd` `.ps1` `.psm1` は CRLF、それ以外は LF)。
+- File format ワークフローが、作業ブランチの main との分岐点からの変更でこれを検査します。意図して変換するときは、コミットメッセージに `Format-Change: <パス or glob>` の行を書きます。push 前に手元で確かめるには次を実行します。
+
+  ```bash
+  python .github/scripts/check-file-format.py --base origin/main
+  ```
 
 ## ライセンス
 

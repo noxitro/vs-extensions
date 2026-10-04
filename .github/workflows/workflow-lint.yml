@@ -1,0 +1,75 @@
+# ============================================================
+# Workflow lint
+#
+# 目的  : CI 自身 (.github/workflows/*.yml、composite action、.github/scripts/*.py) の
+#         書き間違いを push の時点で拾う。ワークフローの式や条件の誤りは、実際に
+#         動かすまで見つからない (Nox の CI で、レビュー 3 回で計 20 件近く直した)。
+# 中身  : actionlint … ワークフローの構文・式・needs / matrix / permissions の整合を見る。
+#                      run: の bash はランナー同梱の shellcheck で検査する。
+#         ruff       … .github/scripts の Python。検査の種類は構文エラーと pyflakes 相当
+#                      (未定義の名前・未使用の import など) に絞り、明示してある。
+#                      ruff は版によって既定の種類が変わる (0.16 で書き方の好みまで増えた)
+#                      ので、既定には任せない。
+# 取得  : どちらも版を固定する。actionlint はリリースの checksums.txt ではなく、ここに
+#         書いた SHA-256 と突き合わせる (同じ場所から取ったチェックサムでは独立した検証に
+#         ならない)。版を上げるときは、リリースの checksums.txt と手元で取得したファイルの
+#         両方で確かめてから書き換える。
+# 環境  : ubuntu-latest。1 回数十秒。公開リポジトリなので無料。
+#         .github 以下を変えた push だけで走る。
+# ============================================================
+
+name: Workflow lint
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - '.github/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: actionlint / ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install actionlint
+        shell: bash
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}" -o "$archive"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint -version
+          # actionlint は、shellcheck が無いと run: の検査を黙って省く。気付けるよう警告にする
+          if command -v shellcheck >/dev/null; then
+            shellcheck --version
+          else
+            echo "::warning::shellcheck が無いので、run: の bash は検査されない"
+          fi
+
+      - name: actionlint
+        shell: bash
+        run: actionlint -color
+
+      - name: ruff
+        shell: bash
+        env:
+          RUFF_VERSION: 0.16.9
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --disable-pip-version-check "ruff==${RUFF_VERSION}"
+          "$RUNNER_TEMP/venv/bin/ruff" check --select E4,E7,E9,F --output-format github .github/scripts

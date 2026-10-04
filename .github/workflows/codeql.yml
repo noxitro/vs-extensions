@@ -1,0 +1,52 @@
+# CodeQL による静的解析 (C#)。公開リポジトリでは無料。
+#
+# VSIX は Visual Studio 付属の MSBuild でしか建たないので、autobuild には任せず
+# build-mode: manual で build.ps1 を叩く (CI と同じ入口)。windows ランナーが要る。
+# 単体テストは CI で回しているので、ここではビルドだけにする。
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 依存やルールの更新で新しく見つかるものがあるので週次でも回す
+    - cron: '37 4 * * 1'
+  workflow_dispatch:
+
+# main と schedule は打ち切らない (打ち切ると main の解析結果が抜ける)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (C#)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      security-events: write   # 解析結果を Security タブに書き込む
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: csharp
+          build-mode: manual
+
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1 -Configuration Debug -SkipTests
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:csharp"

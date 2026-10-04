@@ -7,7 +7,6 @@
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <Authors>noxitro</Authors>
     <Company>noxitro</Company>
-    <Copyright>Copyright (c) 2026 nitro</Copyright>
     <RepositoryRoot>$(MSBuildThisFileDirectory)</RepositoryRoot>
     <!-- ビルド出力はリポジトリ直下の artifacts/ に集約する -->
     <ArtifactsPath>$(MSBuildThisFileDirectory)artifacts</ArtifactsPath>
