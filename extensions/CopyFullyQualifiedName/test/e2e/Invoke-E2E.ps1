@@ -132,6 +132,12 @@ function Save-Diagnostics {
     $Reason | Out-File (Join-Path $DiagnosticsDirectory 'reason.txt') -Encoding utf8
 
     try {
+        # ランナーのコンソールなどが前面にあると VS が写らないので、先に前面へ出す
+        if ($Process -and -not $Process.HasExited) {
+            Add-Type -AssemblyName Microsoft.VisualBasic
+            try { [Microsoft.VisualBasic.Interaction]::AppActivate($Process.Id) } catch { }
+            Start-Sleep -Seconds 1
+        }
         Add-Type -AssemblyName System.Windows.Forms, System.Drawing
         $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
         $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
@@ -153,7 +159,8 @@ function Save-Diagnostics {
         catch { Write-Warning "UI dump failed: $_" }
     }
 
-    # devenv に /log を渡しているので、Exp ハイブに ActivityLog.xml がある
+    # ActivityLog.xml は /log の保存先 (このフォルダー) に直接書かれる。
+    # 念のため Exp ハイブ側に残ったものも集める
     Get-ChildItem (Join-Path $env:APPDATA 'Microsoft\VisualStudio') -Directory -Filter '*Exp' -ErrorAction SilentlyContinue |
         ForEach-Object { Get-ChildItem $_.FullName -Filter 'ActivityLog.xml' -ErrorAction SilentlyContinue } |
         ForEach-Object { Copy-Item $_.FullName (Join-Path $DiagnosticsDirectory "ActivityLog-$($_.Directory.Name).xml") -Force }
@@ -168,7 +175,13 @@ if (-not $SkipBuild) {
 # devenv は起動時の環境変数を引き継ぐので、起動の間だけ設定して元に戻す。
 # 呼び出し元のシェルに残すと、そのシェルから普通に起動した VS でもコピーがスキップされてしまう
 $devenvArgs = @('/rootSuffix', 'Exp', "`"$(Join-Path $samples 'Samples.slnx')`"")
-if ($DiagnosticsDirectory) { $devenvArgs = @('/log') + $devenvArgs }
+if ($DiagnosticsDirectory) {
+    # /log は直後の引数をログの保存先として読むので、保存先を明示して末尾に置く
+    # (先頭に /log だけを置くと /rootSuffix がファイル名と見なされ、「Invalid Command Line」で止まる)
+    New-Item -ItemType Directory -Force -Path $DiagnosticsDirectory | Out-Null
+    $activityLog = Join-Path (Resolve-Path $DiagnosticsDirectory) 'ActivityLog.xml'
+    $devenvArgs += @('/log', "`"$activityLog`"")
+}
 $previousSkip = $env:COPYFQN_E2E_SKIP_CLIPBOARD
 $env:COPYFQN_E2E_SKIP_CLIPBOARD = if ($VerifyClipboard) { $null } else { '1' }
 try {
