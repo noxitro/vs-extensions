@@ -203,7 +203,8 @@ try {
         try { $dte = Get-VsDte -ProcessId $process.Id -TimeoutSeconds 5 } catch { }
     }
     if (-not $dte) { throw "Experimental instance did not become ready within $StartupTimeoutSeconds seconds." }
-    Write-Host "DTE ready: Visual Studio $(Invoke-WithRetry { $dte.Version })"
+    $vsVersion = Invoke-WithRetry { [string]$dte.Version }
+    Write-Host "DTE ready: Visual Studio $vsVersion"
 
     Invoke-WithRetry -TimeoutSeconds 180 {
         if (-not $dte.Solution.IsOpen -or $dte.Solution.Projects.Count -lt 2) { throw 'solution is loading' }
@@ -236,7 +237,9 @@ try {
             $statusDeadline = (Get-Date).AddSeconds(5)
             do {
                 Start-Sleep -Milliseconds 200
-                $status = Invoke-WithRetry { $dte.StatusBar.Text }
+                # ステータスバーが空のときは null が返る (CI で C++ の言語サービスの準備中に実際に起きた)。
+                # 文字列に寄せて、期待値になるまでの再試行に回す
+                $status = [string](Invoke-WithRetry { $dte.StatusBar.Text })
             } while ($status -eq '<e2e-pending>' -and (Get-Date) -lt $statusDeadline)
 
             $actual = $status
@@ -245,7 +248,7 @@ try {
             }
             $ok = $actual -eq $expected
             if ($VerifyClipboard) {
-                $clipboard = Get-Clipboard -Raw
+                $clipboard = [string](Get-Clipboard -Raw)
                 $ok = $ok -and $clipboard -eq $expected
             }
             if (-not $ok) { Start-Sleep -Seconds 2 }

@@ -186,7 +186,8 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # Invoke-E2E.ps1 が Debug でビルドして Exp ハイブへデプロイし、samples/Samples.slnx を開いて検証する
+      # Invoke-E2E.ps1 が Debug でビルドして Exp ハイブへデプロイし、samples/Samples.slnx を開いて検証する。
+      # PASS / FAIL は Write-Host (information ストリーム) に出るので、*>&1 で全ストリームを e2e.log に残す
       - name: Run E2E
         id: e2e
         run: |
@@ -194,7 +195,7 @@ jobs:
             -VerifyClipboard `
             -StartupTimeoutSeconds 900 `
             -CaseTimeoutSeconds 120 `
-            -DiagnosticsDirectory "$env:GITHUB_WORKSPACE/artifacts/e2e-diagnostics" 2>&1 |
+            -DiagnosticsDirectory "$env:GITHUB_WORKSPACE/artifacts/e2e-diagnostics" *>&1 |
             Tee-Object -FilePath e2e.log
           if ($LASTEXITCODE -ne 0) { throw "E2E が失敗 (exit $LASTEXITCODE)" }
 
