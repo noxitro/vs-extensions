@@ -1,0 +1,117 @@
+# ============================================================
+# File format
+#
+# 目的  : push で変わったファイルの BOM を検査する。BOM なしの UTF-8 に統一してあるので、
+#         BOM が付いたら拾う (BOM が要るファイルは .github/scripts/bom_policy.py)。
+#         作業ブランチは main との分岐点から、main は push の前後で比べる。
+#         検査の中身は .github/scripts/check-file-format.py を参照。
+# 改行  : スクリプトは改行コード (CRLF / LF) の変化も見るが、このリポジトリは
+#         .gitattributes の text=auto で git がテキストを LF に正規化して格納するので、
+#         比べる blob はほぼすべて LF になり、改行の検査は実質働かない。改行の混入・
+#         一括変換は git の正規化そのものが防ぐ (Nox は text=auto を使わず、改行を
+#         この検査で守っている点が違う)。git がバイナリと判定したファイルだけは
+#         正規化されないので、その改行の変化はこの検査で拾える。
+# 背景  : Nox で実際に「29 ファイルの BOM 剥がれ」「ヘッダ 1 本の CRLF 一括変換」
+#         「CRLF のファイルへの LF 行の混入」を起こしている。どれも差分が全行に
+#         なり、レビューも履歴も追えなくなる。検査は Nox のものを移植した。
+# 許可  : 意図して変換するときは、コミットメッセージに
+#         「Format-Change: <パス or glob>」の行を書く。
+# 環境  : ubuntu-latest。1 回数秒。公開リポジトリなので無料。
+# ============================================================
+
+name: File format
+
+# secret-scan と同じく paths-ignore を置かない。Markdown の BOM や改行も対象にする。
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+    inputs:
+      base:
+        description: '比較元のリビジョン (空なら直前のコミット)'
+        required: false
+        default: ''
+
+# concurrency は付けない。push ごとの差分 (before..sha) を見るので、1 本でも実行が
+# 消えるとその push の範囲が検査されないまま残る。cancel-in-progress: false にしても
+# 待機中の実行は新しい実行に置き換えられて消えるため、グループ自体を作らない。
+# 各実行は読むだけで互いに干渉しないので、並行して走ってよい。
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: BOM / line endings
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # push の直前の地点や main との分岐点まで遡るため
+
+      - name: Check
+        id: check
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          INPUT_BASE: ${{ inputs.base }}
+        run: |
+          set -uo pipefail
+          # 比較元を決める。
+          #   作業ブランチ : main との分岐点から累積で比べる。事故と、それを直す
+          #                  コミットが相殺されるので、直した push が咎められない。
+          #                  push ごとに全体を見直すので、実行が抜けても取りこぼさない。
+          #                  main の既存コミットを指すだけのブランチは検査しない。
+          #   main         : push 前の地点 (before)。取れなければ失敗にする。
+          #   手動実行     : 入力の base、無ければ直前のコミット
+          # base が head の祖先でなければ、スクリプト側で分岐点に置き換える。
+          ZERO=0000000000000000000000000000000000000000
+          base=''
+          if [ -n "${INPUT_BASE}" ]; then
+            base="${INPUT_BASE}"
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            mb=$(git merge-base origin/main HEAD 2>/dev/null || true)
+            if [ -z "$mb" ]; then
+              echo "main と共通の祖先が無い。検査しない"
+              exit 0
+            elif [ "$mb" = "$(git rev-parse HEAD)" ]; then
+              echo "main に既にあるコミットを指すだけの push なので、検査するものが無い"
+              exit 0
+            fi
+            base="$mb"
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -n "${BEFORE}" ] && [ "${BEFORE}" != "$ZERO" ]; then
+            # main への push。before が手元に無ければ取りに行く。取れなければ、範囲を
+            # 黙って HEAD^ に狭めず失敗させる (途中のコミットの事故が素通りするため)。
+            # main への force-push は禁止なので、通常は起きない。
+            git cat-file -e "${BEFORE}^{commit}" 2>/dev/null || git fetch -q --no-tags origin "${BEFORE}" 2>/dev/null || true
+            if ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+              echo "::error::push 前の地点 ${BEFORE} を取得できないので、この push の範囲を検査できない。手動実行で base を指定して検査すること"
+              exit 1
+            fi
+            base="${BEFORE}"
+          elif git rev-parse --verify --quiet HEAD^ >/dev/null; then
+            base="HEAD^"
+          fi
+          if [ -z "$base" ]; then
+            echo "比較元が無い (ルートコミットだけ)。検査しない"
+            exit 0
+          fi
+          echo "比較元: $base"
+          python3 .github/scripts/check-file-format.py --base "$base" --head HEAD --report "$RUNNER_TEMP/format-report.md"
+
+      # 転んだときだけ Discord に流す。Webhook は ci.yml の notify と同じ secret。
+      # 未設定 (Dependabot の push など) なら警告だけでスキップする。
+      - name: Notify Discord
+        if: failure() && steps.check.outcome == 'failure'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -s "$RUNNER_TEMP/format-report.md" ] || echo "検査スクリプトが途中で失敗した。ログを確認すること" > "$RUNNER_TEMP/format-report.md"
+          python3 .github/scripts/discord_webhook.py \
+            --title ":x: ファイル形式 — ${GITHUB_REPOSITORY} (${GITHUB_REF_NAME})" \
+            --description-file "$RUNNER_TEMP/format-report.md" \
+            --color red --url "$RUN_URL" \
+            --footer "${GITHUB_WORKFLOW} #${GITHUB_RUN_NUMBER} · ${GITHUB_SHA::7}"

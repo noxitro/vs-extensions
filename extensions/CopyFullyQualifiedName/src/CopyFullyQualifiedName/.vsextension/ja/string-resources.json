@@ -1,0 +1,4 @@
+{
+  "CopyFullyQualifiedName.Command.DisplayName": "完全修飾名をコピー",
+  "CopyFullyQualifiedName.Command.ToolTipText": "カーソル位置のシンボルの完全修飾名(名前空間を含む)をクリップボードにコピーします"
+}

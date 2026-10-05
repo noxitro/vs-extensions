@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    VisualStudio.Extensibility の「VSSDK 互換インプロセス拡張」。
+    Roslyn のワークスペースや C++ コードモデル(DTE)など、VS プロセス内の API を使うためにインプロセスで動かす。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>CopyFullyQualifiedName</RootNamespace>
+    <VssdkCompatibleExtension>true</VssdkCompatibleExtension>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.VisualStudio.Extensibility.Sdk" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.VisualStudio.Extensibility.Build" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.VisualStudio.SDK" ExcludeAssets="runtime" />
+    <!-- VisualStudioWorkspace(Roslyn)。実体は VS 本体にあるので同梱しない -->
+    <PackageReference Include="Microsoft.VisualStudio.LanguageServices" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CopyFullyQualifiedName.Core\CopyFullyQualifiedName.Core.csproj" />
+  </ItemGroup>
+</Project>

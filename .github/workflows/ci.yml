@@ -1,0 +1,337 @@
+# ============================================================
+# CI
+#
+# 目的  : push ごとに全拡張機能の VSIX をビルドし、単体テストを走らせて回帰を検知する。
+#         できた .vsix はアーティファクトに残すので、Actions の画面から取ってそのまま
+#         インストールして試せる。
+# 構成  : build … build.ps1 を Release (単体テスト込み) と Debug (ビルドだけ) で走らせる。
+#                 手元の build.bat と同じ入口を通すので、CI だけ通る / 手元だけ通るが起きない。
+#         e2e    … 実験用インスタンスの Visual Studio を起動して、拡張機能を実際に動かす
+#                  (詳細はジョブのコメント)。
+#         notify … 失敗したときと、失敗から復旧したときだけ Discord に流す。
+# 環境  : windows-latest。2026-06 に VS2026 入りのイメージへ移行済み (Nox の CI で確認)。
+#         VSIX のビルドには Visual Studio 付属の MSBuild が要る (dotnet build では建たない)。
+#         「Visual Studio 拡張機能の開発」ワークロードがイメージに無い場合も、build.ps1 は
+#         警告を出して通常の MSBuild で建てる (ビルドタスクは NuGet から来るため)。
+# 費用  : 公開リポジトリなので GitHub ホストランナーは無料。private にすると windows は
+#         無料枠を 2 倍で消費する。そのときはセルフホストランナーを登録し、リポジトリ変数
+#         VSEXT_RUNNER=self-hosted を設定する (セルフホストの実行時間は無料枠を消費しない)。
+# ============================================================
+
+name: CI
+
+on:
+  # 作業ブランチへ push して PR を出す運用なので、ブランチは絞らず全部を対象にする。
+  # タグ push での二重起動を避けるため branches で限定してある。
+  push:
+    branches: ['**']
+    # 文書だけの変更で windows ランナーを起こさない
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
+  # pull_request は外してある。同一リポジトリのブランチからの PR は push 側と合わせて
+  # 毎回 2 倍走り、ref が違うので concurrency でも畳めないため。PR のチェック欄には
+  # push 側の実行結果が出る。フォークからの PR を受けるなら pull_request を戻し、
+  # secrets を触る notify ジョブがフォークで動かないことを確認すること。
+  workflow_dispatch:   # GitHub UI の「Run workflow」から手動実行
+
+# 同じ ref に新しい push が来たら、走っている古い実行を打ち切る。
+# ただし main は打ち切らない。打ち切ると main の結果が虫食いになり、
+# 「main の最新は緑か」も notify の復旧判定も答えられなくなるため。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# GITHUB_TOKEN は既定で読み取りに絞る。書き込みが要るジョブはジョブ側で個別に広げる。
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    name: Build & test
+    runs-on: ${{ vars.VSEXT_RUNNER || 'windows-latest' }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 単体テストは net10.0。イメージにも 10.x は入っているが、
+      # イメージ更新で消えたときに黙って壊れないよう明示的に固定する
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # どの Visual Studio が選ばれたかをログに残して、イメージ更新時に切り分けやすくする
+      - name: Show Visual Studio
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          & $vswhere -latest -prerelease -products * -format text |
+            Select-String -Pattern '^(displayName|installationVersion|installationPath):'
+          $extension = & $vswhere -latest -prerelease -products * -requires Microsoft.VisualStudio.Workload.VisualStudioExtension -property installationPath
+          Write-Host "VisualStudioExtension workload: $(if ($extension) { 'installed' } else { 'not installed' })"
+
+      - name: Build & test (Release)
+        id: release
+        run: |
+          ./build.ps1 -Configuration Release -TestResultsDirectory "$env:GITHUB_WORKSPACE/artifacts/test-results" 2>&1 |
+            Tee-Object -FilePath build-release.log
+          if ($LASTEXITCODE -ne 0) { throw "build.ps1 (Release) が失敗 (exit $LASTEXITCODE)" }
+
+      # Debug だけで壊れる設定 (条件付きのプロパティなど) を拾う。テストは Release で済んでいる
+      - name: Build (Debug)
+        id: debug
+        run: |
+          ./build.ps1 -Configuration Debug -SkipTests 2>&1 | Tee-Object -FilePath build-debug.log
+          if ($LASTEXITCODE -ne 0) { throw "build.ps1 (Debug) が失敗 (exit $LASTEXITCODE)" }
+
+      # Debug のビルドが artifacts/vsix を上書きするので、Release の .vsix を上げ直すため作り直す。
+      # Debug だけ落ちたときも Release の .vsix は試せるよう上げる。status 関数を書かないと
+      # 既定の success() (= それまでの全ステップが成功) が付くので、!cancelled() を明示する
+      - name: Collect Release VSIX
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        run: |
+          $out = New-Item -ItemType Directory -Force -Path 'artifacts/vsix-release'
+          Get-ChildItem 'artifacts/bin' -Recurse -Filter '*.vsix' |
+            Where-Object { $_.Directory.Name -eq 'release' } |
+            Copy-Item -Destination $out -Force
+          Get-ChildItem $out -Name
+
+      - name: Upload VSIX
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: vsix
+          path: artifacts/vsix-release/*.vsix
+          if-no-files-found: error
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: artifacts/test-results/*.trx
+          if-no-files-found: warn
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-logs
+          path: build-*.log
+          if-no-files-found: warn
+
+      - name: Write job summary
+        if: always()
+        run: |
+          $lines = @('## Build & test', '')
+          foreach ($step in @(
+              @{ Name = 'Release (ビルド + 単体テスト)'; Outcome = '${{ steps.release.outcome }}' },
+              @{ Name = 'Debug (ビルド)'; Outcome = '${{ steps.debug.outcome }}' })) {
+            $icon = switch ($step.Outcome) { 'success' { ':white_check_mark:' } 'skipped' { ':fast_forward:' } default { ':x:' } }
+            $lines += "- $icon $($step.Name): $($step.Outcome)"
+          }
+
+          # .trx の集計 (Counters) をテストプロジェクトごとに出す
+          $trx = Get-ChildItem 'artifacts/test-results' -Filter '*.trx' -ErrorAction SilentlyContinue
+          if ($trx) {
+            $lines += '', '| テスト | 合計 | 成功 | 失敗 |', '| --- | ---: | ---: | ---: |'
+            foreach ($file in $trx) {
+              $c = ([xml](Get-Content $file.FullName -Raw)).TestRun.ResultSummary.Counters
+              $lines += "| $($file.BaseName) | $($c.total) | $($c.passed) | $($c.failed) |"
+            }
+          }
+
+          $vsix = Get-ChildItem 'artifacts/vsix-release' -Filter '*.vsix' -ErrorAction SilentlyContinue
+          if ($vsix) {
+            $lines += '', 'VSIX (アーティファクト `vsix`):'
+            $lines += $vsix | ForEach-Object { "- ``$($_.Name)`` ($([math]::Round($_.Length / 1KB)) KB)" }
+          }
+          $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+  # =========================================================
+  # E2E: 実験用インスタンスの Visual Studio を起動し、右クリックメニューの
+  # 項目を DTE で実行して、ステータスバーとクリップボードの中身を照合する
+  #
+  # GitHub ホストの windows ランナーは対話デスクトップを持つ (Nox の FlaUI が動いている) ので、
+  # 画面付きの devenv を起こせる。手元と違ってクリップボードを使う人がいないので、
+  # -VerifyClipboard で実際にコピーされた文字列まで確かめる。
+  #
+  # 必須のジョブ。試行期間に 4 回連続 (うち 3 回は別々のランナーで並列) 30/30 で通ったので
+  # continue-on-error を外した (2026-10-05)。既報のリスク:
+  #   - VS 2026 入りイメージで devenv が「ライセンスの評価期間が終了」と出たことがある
+  #     (actions/runner-images#13641。イメージ更新で直った)。再発したら diagnostics の
+  #     screenshot.png / ui-elements.txt にダイアログが写る
+  #   - 真新しいイメージの初回起動は遅いので、起動待ちを長めに取る
+  # =========================================================
+  e2e:
+    name: E2E (Visual Studio)
+    runs-on: ${{ vars.VSEXT_RUNNER || 'windows-latest' }}
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # Invoke-E2E.ps1 が Debug でビルドして Exp ハイブへデプロイし、samples/Samples.slnx を開いて検証する。
+      # PASS / FAIL は Write-Host (information ストリーム) に出るので、*>&1 で全ストリームを e2e.log に残す
+      - name: Run E2E
+        id: e2e
+        run: |
+          ./extensions/CopyFullyQualifiedName/test/e2e/Invoke-E2E.ps1 `
+            -VerifyClipboard `
+            -StartupTimeoutSeconds 900 `
+            -CaseTimeoutSeconds 120 `
+            -DiagnosticsDirectory "$env:GITHUB_WORKSPACE/artifacts/e2e-diagnostics" *>&1 |
+            Tee-Object -FilePath e2e.log
+          if ($LASTEXITCODE -ne 0) { throw "E2E が失敗 (exit $LASTEXITCODE)" }
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics
+          path: |
+            artifacts/e2e-diagnostics/
+            e2e.log
+          if-no-files-found: warn
+
+      - name: Write job summary
+        if: always()
+        run: |
+          $icon = if ('${{ steps.e2e.outcome }}' -eq 'success') { ':white_check_mark:' } else { ':x:' }
+          $lines = @("## $icon E2E (Visual Studio)", '')
+          if (Test-Path e2e.log) {
+            $lines += Get-Content e2e.log | Select-String -Pattern '^(PASS|FAIL) |passed\.$|Solution loaded|First-run|Stopping' |
+              ForEach-Object { "- ``$($_.Line.Trim())``" }
+          }
+          $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+  # =========================================================
+  # Notify: 失敗したときと、失敗から復旧したときだけ Discord に流す
+  #
+  # 毎回流すと埋もれるので、「見るべきものがある」ときに絞る。
+  # webhook は secret DISCORD_WEBHOOK_URL を参照する。未設定なら
+  # 警告だけ出してスキップし、CI 自体は落とさない。
+  # =========================================================
+  notify:
+    name: Notify Discord
+    needs: [build, e2e]
+    # 判定は step 側で needs.*.result を見るので、ここでは always() で拾うだけ
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read   # 直前の実行結果 (復旧判定) と失敗ジョブ一覧の取得に要る
+
+    steps:
+      # 今回の結果と「直前の完了実行」の結果を突き合わせて、
+      # failure / recovered / none のどれかに落とす
+      - name: Decide whether to notify
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          $results = ($env:RESULTS -split '\s+') | Where-Object { $_ }
+          Write-Host "needs results: $($results -join ', ')"
+
+          $kind = 'none'
+          if ($results -contains 'cancelled') {
+            # concurrency の打ち切り。人為的な中断なので通知しない
+            Write-Host 'cancelled が含まれるので通知しない'
+          }
+          elseif ($results -contains 'failure') {
+            $kind = 'failure'
+          }
+          else {
+            # 全部 success。直前の完了実行が failure なら復旧
+            $repo = $env:GITHUB_REPOSITORY
+            $branch = [uri]::EscapeDataString($env:GITHUB_REF_NAME)
+            $runId = [int64]$env:GITHUB_RUN_ID
+            $prev = gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=$branch&status=completed&per_page=20" `
+              --jq '[.workflow_runs[] | {id, conclusion}]' | ConvertFrom-Json |
+              Where-Object { $_.id -lt $runId -and $_.conclusion -in @('success', 'failure') } |
+              Select-Object -First 1
+
+            if ($prev -and $prev.conclusion -eq 'failure') {
+              $kind = 'recovered'
+              Write-Host "直前の完了実行 (run $($prev.id)) が failure だったので復旧通知"
+            } else {
+              Write-Host "直前の完了実行: $(if ($prev) { $prev.conclusion } else { 'なし' })。通知しない"
+            }
+          }
+
+          "kind=$kind" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Post to Discord
+        if: steps.decide.outputs.kind != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          KIND: ${{ steps.decide.outputs.kind }}
+        run: |
+          if (-not $env:WEBHOOK) {
+            Write-Host '::warning::DISCORD_WEBHOOK_URL が未設定なので通知をスキップする'
+            exit 0
+          }
+
+          $repo   = $env:GITHUB_REPOSITORY
+          $runId  = $env:GITHUB_RUN_ID
+          $sha    = $env:GITHUB_SHA
+          $runUrl = "$env:GITHUB_SERVER_URL/$repo/actions/runs/$runId"
+
+          # コミットの件名。push 以外 (workflow_dispatch) でも取れるよう
+          # イベントペイロードではなく API から引く
+          $subject = (gh api "repos/$repo/commits/$sha" --jq '.commit.message' 2>$null) -split "`n" | Select-Object -First 1
+          if (-not $subject) { $subject = '(コミットメッセージ取得失敗)' }
+
+          $fields = @(
+            @{ name = 'ブランチ'; value = "``$env:GITHUB_REF_NAME``"; inline = $true }
+            @{ name = 'きっかけ'; value = "``$env:GITHUB_EVENT_NAME``"; inline = $true }
+            @{ name = 'コミット'; value = "[``$($sha.Substring(0,7))``]($env:GITHUB_SERVER_URL/$repo/commit/$sha) $subject"; inline = $false }
+          )
+
+          if ($env:KIND -eq 'failure') {
+            $title = ":x: CI 失敗 — $repo"
+            $color = 14687012   # 赤
+            $failed = gh api "repos/$repo/actions/runs/$runId/jobs?per_page=100" `
+              --jq '.jobs[] | select(.conclusion == "failure") | .name'
+            if ($failed) {
+              $fields += @{ name = '落ちたジョブ'; value = (($failed | ForEach-Object { "- $_" }) -join "`n"); inline = $false }
+            }
+          } else {
+            $title = ":white_check_mark: CI 復旧 — $repo"
+            $color = 3055683    # 緑
+          }
+
+          $payload = @{
+            username = 'GitHub Actions'
+            embeds = @(
+              @{
+                title     = $title
+                url       = $runUrl
+                color     = $color
+                fields    = $fields
+                footer    = @{ text = "$env:GITHUB_WORKFLOW #$env:GITHUB_RUN_NUMBER" }
+                timestamp = (Get-Date).ToUniversalTime().ToString('o')
+              }
+            )
+          } | ConvertTo-Json -Depth 6 -Compress
+
+          Invoke-RestMethod -Uri $env:WEBHOOK -Method Post `
+            -ContentType 'application/json; charset=utf-8' -Body $payload | Out-Null
+          Write-Host "Discord に通知した ($env:KIND)"

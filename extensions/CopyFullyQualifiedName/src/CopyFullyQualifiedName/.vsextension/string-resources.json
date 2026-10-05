@@ -1,0 +1,4 @@
+{
+  "CopyFullyQualifiedName.Command.DisplayName": "Copy Fully Qualified Name",
+  "CopyFullyQualifiedName.Command.ToolTipText": "Copy the fully qualified name (including namespaces) of the symbol at the caret"
+}

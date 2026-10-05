@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/extensions/" />
+  <Folder Name="/extensions/CopyFullyQualifiedName/">
+    <Project Path="extensions/CopyFullyQualifiedName/src/CopyFullyQualifiedName.Core/CopyFullyQualifiedName.Core.csproj" />
+    <Project Path="extensions/CopyFullyQualifiedName/src/CopyFullyQualifiedName/CopyFullyQualifiedName.csproj" />
+    <Project Path="extensions/CopyFullyQualifiedName/test/CopyFullyQualifiedName.Core.Tests/CopyFullyQualifiedName.Core.Tests.csproj" />
+  </Folder>
+</Solution>

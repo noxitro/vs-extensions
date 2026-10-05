@@ -1,0 +1,42 @@
+# Dependabot の更新対象。公開リポジトリなので無料で使える。
+
+version: 2
+updates:
+  # GitHub Actions 自体の更新。actions/checkout@v7 のような参照が古くなるのを拾う。
+  # composite action を足したら directories に列挙すること (directory: / だけだと
+  # .github/workflows/ しか見ず、composite 側が古い版のまま取り残される。Nox で実際に起きた)。
+  - package-ecosystem: github-actions
+    directories:
+      - /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-across-directories:
+        group-by: dependency-name
+
+  # NuGet。バージョンは Directory.Packages.props で一元管理しているので、ルートを見れば足りる。
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 5
+    ignore:
+      # Roslyn と VS SDK は「対応する最も古い VS (17.14) が持っている版」に合わせてある。
+      # 上げると古い VS で読み込めなくなるので、対応 VS を上げるときに手で揃える。
+      - dependency-name: "Microsoft.CodeAnalysis.*"
+      - dependency-name: "Microsoft.VisualStudio.LanguageServices"
+      - dependency-name: "Microsoft.VisualStudio.SDK"
+      - dependency-name: "Microsoft.VisualStudio.Extensibility.*"
+    # minor / patch の更新は 1 本の PR にまとめる (Nox でプロジェクトごとの PR に割れ、
+    # 手で版を揃え直す手間が出たため)。major は挙動が変わりうるので個別の PR に残す。
+    groups:
+      nuget-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
