@@ -95,7 +95,7 @@ GitHub Actions で次のワークフローが動きます(公開リポジトリ�
 
 | ワークフロー | きっかけ | 内容 |
 | --- | --- | --- |
-| [CI](.github/workflows/ci.yml) | 全ブランチへの push(文書だけの変更は除く) | `build.ps1` で Release(単体テスト込み)と Debug をビルド。`.vsix` をアーティファクト `vsix` に保存。実験用 Visual Studio を起動する E2E テスト(試行中)。失敗時と復旧時に Discord へ通知 |
+| [CI](.github/workflows/ci.yml) | 全ブランチへの push(文書だけの変更は除く) | `build.ps1` で Release(単体テスト込み)と Debug をビルド。`.vsix` をアーティファクト `vsix` に保存。実験用 Visual Studio を起動する E2E テスト。失敗時と復旧時に Discord へ通知 |
 | [CodeQL](.github/workflows/codeql.yml) | main への push・PR、毎週 | C# の静的解析 |
 | [File format](.github/workflows/file-format.yml) | 全ブランチへの push | BOM の検査(下の「ファイル形式」) |
 | [Secret scan](.github/workflows/secret-scan.yml) | 全ブランチへの push・PR | 秘密情報・個人情報・ライセンス文言の混入検査([noxitro/github-templates](https://github.com/noxitro/github-templates) の共通ワークフロー) |
@@ -104,7 +104,7 @@ GitHub Actions で次のワークフローが動きます(公開リポジトリ�
 補足:
 
 - 同じリポジトリのブランチからの PR では、CI は push 側だけで走ります(二重起動を避けるため)。PR のチェック欄には push 側の結果が出ます。
-- E2E テスト(`extensions/*/test/e2e`)は CI でも実験用の Visual Studio を起動して走らせ、クリップボードに実際に入った文字列まで確かめます。安定するまでは試行扱いで、落ちても CI 全体は失敗にしません。落ちたときはアーティファクト `e2e-diagnostics` にスクリーンショット・画面上の文字・VS のログが残ります。
+- E2E テスト(`extensions/*/test/e2e`)は CI でも実験用の Visual Studio を起動して走らせ、クリップボードに実際に入った文字列まで確かめます。落ちたときはアーティファクト `e2e-diagnostics` にスクリーンショット・画面上の文字・VS のログが残ります。
 - Discord 通知は secret `DISCORD_WEBHOOK_URL` を使います。未設定ならスキップするだけで、CI は落ちません。
 - 依存の更新は Dependabot が週 1 回 PR を出します。Roslyn と VS SDK は対応する最も古い VS に合わせているので、自動更新の対象から外しています。
 

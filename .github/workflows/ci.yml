@@ -7,7 +7,7 @@
 # 構成  : build … build.ps1 を Release (単体テスト込み) と Debug (ビルドだけ) で走らせる。
 #                 手元の build.bat と同じ入口を通すので、CI だけ通る / 手元だけ通るが起きない。
 #         e2e    … 実験用インスタンスの Visual Studio を起動して、拡張機能を実際に動かす
-#                  (試行中。落ちても CI 全体は落とさない。詳細はジョブのコメント)。
+#                  (詳細はジョブのコメント)。
 #         notify … 失敗したときと、失敗から復旧したときだけ Discord に流す。
 # 環境  : windows-latest。2026-06 に VS2026 入りのイメージへ移行済み (Nox の CI で確認)。
 #         VSIX のビルドには Visual Studio 付属の MSBuild が要る (dotnet build では建たない)。
@@ -164,24 +164,17 @@ jobs:
   # 画面付きの devenv を起こせる。手元と違ってクリップボードを使う人がいないので、
   # -VerifyClipboard で実際にコピーされた文字列まで確かめる。
   #
-  # 試行中なので continue-on-error にしてある (落ちても CI 全体は緑のまま、ジョブに印が付く)。
-  # 数回続けて安定したら外して必須にする。既報のリスク:
+  # 必須のジョブ。試行期間に 4 回連続 (うち 3 回は別々のランナーで並列) 30/30 で通ったので
+  # continue-on-error を外した (2026-10-05)。既報のリスク:
   #   - VS 2026 入りイメージで devenv が「ライセンスの評価期間が終了」と出たことがある
   #     (actions/runner-images#13641。イメージ更新で直った)。再発したら diagnostics の
   #     screenshot.png / ui-elements.txt にダイアログが写る
   #   - 真新しいイメージの初回起動は遅いので、起動待ちを長めに取る
   # =========================================================
   e2e:
-    name: E2E (Visual Studio) #${{ matrix.attempt }}
+    name: E2E (Visual Studio)
     runs-on: ${{ vars.VSEXT_RUNNER || 'windows-latest' }}
     timeout-minutes: 40
-    continue-on-error: true
-    # 安定性の確認のため一時的に 3 並列で同じテストを回している (各ランナーは真新しいイメージ)。
-    # 全部通ったら matrix を外し、continue-on-error も外して必須にする
-    strategy:
-      fail-fast: false
-      matrix:
-        attempt: [1, 2, 3]
 
     steps:
       - name: Checkout
@@ -209,7 +202,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-diagnostics-${{ matrix.attempt }}
+          name: e2e-diagnostics
           path: |
             artifacts/e2e-diagnostics/
             e2e.log
@@ -219,7 +212,7 @@ jobs:
         if: always()
         run: |
           $icon = if ('${{ steps.e2e.outcome }}' -eq 'success') { ':white_check_mark:' } else { ':x:' }
-          $lines = @("## $icon E2E (Visual Studio) #${{ matrix.attempt }}", '')
+          $lines = @("## $icon E2E (Visual Studio)", '')
           if (Test-Path e2e.log) {
             $lines += Get-Content e2e.log | Select-String -Pattern '^(PASS|FAIL) |passed\.$|Solution loaded|First-run|Stopping' |
               ForEach-Object { "- ``$($_.Line.Trim())``" }
@@ -235,7 +228,7 @@ jobs:
   # =========================================================
   notify:
     name: Notify Discord
-    needs: [build]
+    needs: [build, e2e]
     # 判定は step 側で needs.*.result を見るので、ここでは always() で拾うだけ
     if: always()
     runs-on: ubuntu-latest
