@@ -203,12 +203,13 @@ try {
         try { $dte = Get-VsDte -ProcessId $process.Id -TimeoutSeconds 5 } catch { }
     }
     if (-not $dte) { throw "Experimental instance did not become ready within $StartupTimeoutSeconds seconds." }
-    $vsVersion = Invoke-WithRetry { [string]$dte.Version }
-    Write-Host "DTE ready: Visual Studio $vsVersion"
+    Write-Host 'DTE ready.'
 
     Invoke-WithRetry -TimeoutSeconds 180 {
         if (-not $dte.Solution.IsOpen -or $dte.Solution.Projects.Count -lt 2) { throw 'solution is loading' }
     }
+    # DTE の登録直後は Version が空のことがあるので、ソリューションが開いてから読む
+    Write-Host "Solution loaded: Visual Studio $(Invoke-WithRetry { [string]$dte.Version }) ($(Split-Path $dte.FullName -Leaf))"
 
     $menuItem = Invoke-WithRetry -TimeoutSeconds 120 {
         $item = $dte.CommandBars.Item('Code Window').Controls |
